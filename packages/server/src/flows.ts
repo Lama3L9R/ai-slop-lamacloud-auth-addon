@@ -6,10 +6,13 @@ import { randomBytes } from 'node:crypto';
  */
 export interface Flow {
   id: string;
+  /** login: pending Yubico OTP check; bind: authenticated, waiting for a new YubiKey */
+  purpose: 'login' | 'bind';
   authRequestId: string | undefined;
   sessionId: string;
   sessionToken: string;
   userId: string;
+  loginName: string;
   /** YubiKey public IDs allowed for this user */
   yubikeyIds: string[];
   otpAttempts: number;

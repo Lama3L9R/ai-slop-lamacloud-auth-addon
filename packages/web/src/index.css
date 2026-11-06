@@ -206,6 +206,75 @@ body {
   }
 }
 
+/* dash list for explanations, wrapped lines indented under the text */
+.notes {
+  padding: 0;
+  list-style: none;
+}
+
+.notes li {
+  padding-left: 2ch;
+  text-indent: -2ch;
+}
+
+.notes li::before {
+  content: '- ';
+}
+
+/* ---------- bound YubiKeys ---------- */
+
+.keys {
+  display: flex;
+  align-items: baseline;
+  margin-bottom: 1lh;
+}
+
+.keys-label {
+  flex: 0 0 var(--label-width);
+  color: var(--dim);
+}
+
+.keys-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dim {
+  color: var(--dim);
+}
+
+/* inline <Action> button, inverted when focused like the prompt */
+.action {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+
+.action::before {
+  content: '<';
+}
+
+.action::after {
+  content: '>';
+}
+
+.action:hover,
+.action:focus-visible {
+  outline: none;
+  background: var(--fg);
+  color: var(--bg);
+}
+
+.action:disabled {
+  color: var(--dim);
+  background: transparent;
+  cursor: default;
+}
+
 /* ---------- status line ---------- */
 
 .status {
@@ -226,12 +295,14 @@ body {
 /* ---------- narrow screens: stack label above input ---------- */
 
 @media (max-width: 480px) {
-  .field {
+  .field,
+  .keys {
     flex-direction: column;
     margin-bottom: 0.5lh;
   }
 
-  .field label {
+  .field label,
+  .keys-label {
     flex-basis: auto;
   }
 

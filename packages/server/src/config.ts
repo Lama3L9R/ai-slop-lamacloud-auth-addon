@@ -14,6 +14,11 @@ const configSchema = z.object({
       trustProxy: z.boolean().default(false),
       /** Serve the built web app (packages/web/dist) from this directory. Optional. */
       webRoot: z.string().optional(),
+      /**
+       * Secret for signing the cookie that lists this browser's sessions (used by logout).
+       * Random per process if unset: logouts after a restart then won't terminate older sessions.
+       */
+      cookieSecret: z.string().min(32).optional(),
     })
     .prefault({}),
 
@@ -36,7 +41,19 @@ const configSchema = z.object({
      * Users without this key skip the Yubico OTP step.
      */
     metadataKey: z.string().min(1).default('yubico_otp'),
+    /**
+     * Metadata key set when a user reports a lost YubiKey. While it exists every sign-in fails
+     * as if the password were wrong; only an admin can remove it (Zitadel console).
+     */
+    lockdownKey: z.string().min(1).default('yubikey_lost'),
   }),
+
+  registration: z
+    .object({
+      /** Organization new users are created in. Registration is disabled when unset. */
+      organizationId: z.string().min(1).optional(),
+    })
+    .prefault({}),
 
   /** Where to send the user after a login that did not start from an OIDC auth request. */
   defaultRedirectUrl: z.url().optional(),

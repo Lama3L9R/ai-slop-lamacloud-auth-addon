@@ -39,6 +39,15 @@ export interface CreatedSession {
   sessionToken: string;
 }
 
+export interface PasswordComplexity {
+  /** uint64, a string in JSON */
+  minLength?: string | number;
+  requiresUppercase?: boolean;
+  requiresLowercase?: boolean;
+  requiresNumber?: boolean;
+  requiresSymbol?: boolean;
+}
+
 export interface UserAgent {
   ip?: string;
   description?: string;
@@ -99,17 +108,17 @@ export class ZitadelClient {
   // ---------- sessions ----------
 
   /**
-   * Creates a session for `loginName`. With `password` set, the password is checked too
+   * Creates a session for a user. With `password` set, the password is checked too
    * (failures count towards Zitadel's lockout policy).
    */
   async createSession(
-    loginName: string,
+    user: { loginName: string } | { userId: string },
     password: string | undefined,
     userAgent?: UserAgent,
   ): Promise<CreatedSession> {
     return this.request<CreatedSession>('POST', '/v2/sessions', {
       checks: {
-        user: { loginName },
+        user,
         ...(password !== undefined && { password: { password } }),
       },
       ...(userAgent && { userAgent }),
@@ -142,6 +151,74 @@ export class ZitadelClient {
     const entry = res.metadata?.find((m) => m.key === key);
     // metadata values are bytes, base64 encoded in JSON
     return entry ? Buffer.from(entry.value, 'base64').toString('utf8') : undefined;
+  }
+
+  /**
+   * Creates a human user. Zitadel emails a verification link built from `emailUrlTemplate`
+   * ({{.UserID}} and {{.Code}} are filled in).
+   */
+  async createHumanUser(user: {
+    organizationId: string;
+    username: string;
+    email: string;
+    password: string;
+    emailUrlTemplate: string;
+    metadata?: Record<string, string>;
+  }): Promise<{ id: string }> {
+    return this.request<{ id: string }>('POST', '/v2/users/new', {
+      organizationId: user.organizationId,
+      username: user.username,
+      human: {
+        profile: {
+          givenName: user.username,
+          familyName: user.username,
+          displayName: user.username,
+        },
+        email: { email: user.email, sendCode: { urlTemplate: user.emailUrlTemplate } },
+        password: { password: user.password, changeRequired: false },
+        metadata: Object.entries(user.metadata ?? {}).map(([key, value]) => ({
+          key,
+          value: Buffer.from(value, 'utf8').toString('base64'),
+        })),
+      },
+    });
+  }
+
+  async verifyEmail(userId: string, code: string): Promise<void> {
+    await this.request('POST', `/v2/users/${encodeURIComponent(userId)}/email/verify`, {
+      verificationCode: code,
+    });
+  }
+
+  /** Emails the user a password reset link built from `urlTemplate` ({{.UserID}}, {{.Code}}). */
+  async requestPasswordReset(userId: string, urlTemplate: string): Promise<void> {
+    await this.request('POST', `/v2/users/${encodeURIComponent(userId)}/password_reset`, {
+      sendLink: { notificationType: 'NOTIFICATION_TYPE_Email', urlTemplate },
+    });
+  }
+
+  async setPasswordWithCode(userId: string, code: string, password: string): Promise<void> {
+    await this.request('POST', `/v2/users/${encodeURIComponent(userId)}/password`, {
+      newPassword: { password, changeRequired: false },
+      verificationCode: code,
+    });
+  }
+
+  /** Password rules of an organization (or the instance defaults). */
+  async getPasswordComplexity(orgId?: string): Promise<PasswordComplexity> {
+    const query = orgId ? `?ctx.orgId=${encodeURIComponent(orgId)}` : '?ctx.instance=true';
+    const res = await this.request<{ settings: PasswordComplexity }>(
+      'GET',
+      `/v2/settings/password/complexity${query}`,
+    );
+    return res.settings;
+  }
+
+  /** Sets (overwrites) one metadata entry of a user; an empty value deletes it. */
+  async setUserMetadata(userId: string, key: string, value: string): Promise<void> {
+    await this.request('POST', `/v2/users/${encodeURIComponent(userId)}/metadata`, {
+      metadata: [{ key, value: Buffer.from(value, 'utf8').toString('base64') }],
+    });
   }
 
   // ---------- applications ----------

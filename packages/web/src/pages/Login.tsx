@@ -1,6 +1,6 @@
 import { createEffect, createSignal } from 'solid-js';
 import { useLocation, useNavigate } from '@solidjs/router';
-import { errorText, post, type StepResult } from '../api.ts';
+import { api, errorText, post, type StepResult } from '../api.ts';
 import { authRequestId, loginHint } from '../state.ts';
 import { Screen } from '../components/Screen.tsx';
 import { Field } from '../components/Field.tsx';
@@ -62,9 +62,18 @@ export default function Login() {
     (e.currentTarget.form?.elements.namedItem('password') as HTMLInputElement | null)?.focus();
   };
 
-  const onRegister = () => {
-    // TODO: registration flow
-    setStatus({ kind: 'info', text: 'registration is not available yet' });
+  // keeps the auth request so a new account can sign in to the app right away
+  const withAuthRequest = (path: string) => {
+    const id = authRequestId();
+    return id ? `${path}?authRequest=${encodeURIComponent(id)}` : path;
+  };
+
+  const onRegister = async () => {
+    const { enabled } = await api<{ enabled: boolean }>('/registration').catch(() => ({
+      enabled: false,
+    }));
+    if (enabled) navigate(withAuthRequest('/register'));
+    else setStatus({ kind: 'info', text: 'registration is not available yet' });
   };
 
   return (
@@ -98,6 +107,12 @@ export default function Login() {
             register
           </button>{' '}
           a new account.
+          <br />
+          Forgot your password?{' '}
+          <button class="link" type="button" onClick={() => navigate('/password/reset')}>
+            Reset
+          </button>{' '}
+          it by email.
         </p>
       </form>
       <Status message={status()} />

@@ -14,3 +14,11 @@ export function useSubmitOnBareEnter(form: () => HTMLFormElement | undefined) {
   onMount(() => document.addEventListener('keydown', onKeyDown));
   onCleanup(() => document.removeEventListener('keydown', onKeyDown));
 }
+
+/** keydown handler: Enter moves focus to the form field named `next` instead of submitting. */
+export const focusOnEnter =
+  (next: string) => (e: KeyboardEvent & { currentTarget: HTMLInputElement }) => {
+    if (!isPlainEnter(e)) return;
+    e.preventDefault();
+    (e.currentTarget.form?.elements.namedItem(next) as HTMLInputElement | null)?.focus();
+  };

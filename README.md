@@ -55,22 +55,46 @@ Custom Zitadel login UI (Login V2 API) with optional Yubico OTP as second factor
 ## Zitadel setup
 
 1. Create a service user, give it the **IAM_LOGIN_CLIENT** role (instance level), create a PAT.
-2. Enable Login V2 for the instance (or per app) with base URI = where this app is served,
-   e.g. `https://login.example.com`. Zitadel redirects to `<baseURI>/login?authRequest=V2_...`.
-3. Per user, to require a YubiKey: add user metadata `yubico_otp` (key configurable) with the
-   key's public ID(s), i.e. the first 12 characters of an OTP, comma or whitespace separated.
-   Users without this metadata only need their password.
+2. Enable Login V2 for the instance (or per app) and leave the base URI empty: Zitadel then uses
+   its default `/ui/v2/login` on its own domain, which is where this app lives
+   (login: `/ui/v2/login/login?authRequest=V2_...`, logout: `/ui/v2/login/logout?...`).
+3. YubiKeys are stored as user metadata `yubico_otp` (key configurable): the keys' public IDs, i.e.
+   the first 12 characters of an OTP, comma or whitespace separated. Users bind keys themselves at
+   `/ui/v2/login/yubikey` (first key: password; more keys: an OTP from an already bound key), where
+   they can also deactivate bound keys, or an admin edits the metadata. Users without this metadata
+   only need their password.
+4. Lost key: at `/ui/v2/login/yubikey/lost` a user enters their username and the key's public ID,
+   which sets the metadata `yubikey_lost` (`yubico.lockdownKey`). While it exists every sign-in
+   (password or key) fails with the usual "invalid username or password" and no password reset
+   email is sent. To unlock, an admin deletes that metadata entry in the Zitadel console.
+5. Registration (`/ui/v2/login/register`) is enabled by setting `registration.organizationId` to the
+   organization new users go into. A Yubico OTP given there binds that key right away.
+6. Emails (address verification after registration, password reset codes) are sent by Zitadel, so
+   it needs SMTP configured. Their links point to `/ui/v2/login/verify` and
+   `/ui/v2/login/password/set`. Password reset only works through this emailed code.
 
 ## Config
 
 `packages/server/config.json` (see `config.example.json`; pass another path with `--config`).
 Yubico API credentials: https://upgrade.yubico.com/getapikey/
 
+## Reverse proxy
+
+Route `/ui/v2/login/` to this app and everything else to Zitadel, on the Zitadel domain
+(set `server.trustProxy: true`):
+
+```nix
+services.nginx.virtualHosts."auth.example.com".locations."/ui/v2/login/" = {
+  proxyPass = "http://127.0.0.1:3000";
+  recommendedProxySettings = true;
+};
+```
+
 ## Run
 
 ```sh
 pnpm install
-pnpm dev                 # web on :5173 (proxies /api), server on :3000
+pnpm dev                 # http://localhost:5173/ui/v2/login/ (proxies api + logout), server on :3000
 pnpm build
 node packages/server/dist/index.js --config config.json   # set server.webRoot to packages/web/dist to serve the UI too
 ```
@@ -98,6 +122,5 @@ node packages/server/dist/index.js --config config.json   # set server.webRoot t
 
 ## Not implemented yet
 
-- `/logout` (Zitadel sends users there on end_session without id_token_hint)
-- registration, SAML / device authorization requests, Zitadel-native MFA (TOTP, passkeys)
+- SAML / device authorization requests, Zitadel-native MFA (TOTP, passkeys)
 - SSO across apps: no Zitadel session is kept in the browser, so every app login asks again

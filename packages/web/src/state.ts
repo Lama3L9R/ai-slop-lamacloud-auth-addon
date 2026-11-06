@@ -9,12 +9,16 @@ const query = new URLSearchParams(location.search);
  */
 export const [authRequestId] = createSignal(rememberAuthRequest(query.get('authRequest')));
 
-/** Keeps the auth request ID in sessionStorage so reloading a later step doesn't lose it. */
+/**
+ * Keeps the auth request ID in sessionStorage so reloading the OTP step doesn't lose it.
+ * Only the OTP page restores it: anywhere else a stored ID would be stale.
+ */
 function rememberAuthRequest(fromQuery: string | null): string | undefined {
   const KEY = 'authRequest';
   try {
     if (fromQuery) sessionStorage.setItem(KEY, fromQuery);
-    return fromQuery ?? sessionStorage.getItem(KEY) ?? undefined;
+    if (fromQuery || !location.pathname.endsWith('/otp')) return fromQuery ?? undefined;
+    return sessionStorage.getItem(KEY) ?? undefined;
   } catch {
     return fromQuery ?? undefined; // storage blocked
   }

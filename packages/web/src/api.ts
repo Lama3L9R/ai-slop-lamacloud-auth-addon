@@ -11,7 +11,7 @@ export class ApiError extends Error {
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`/api${path}`, {
+  const res = await fetch(`${import.meta.env.BASE_URL}api${path}`, {
     ...init,
     headers: { 'content-type': 'application/json', ...init?.headers },
   });

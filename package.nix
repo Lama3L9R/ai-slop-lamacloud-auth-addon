@@ -17,8 +17,8 @@ stdenv.mkDerivation (finalAttrs: {
   version = "0.1.0";
 
   src = fetchFromGitHub {
-    owner = "TODO";
-    repo = "TODO";
+    owner = "Lama3L9R";
+    repo = "ai-slop-lamacloud-auth-addon";
     rev = "v${finalAttrs.version}";
     hash = lib.fakeHash; # TODO
   };
@@ -65,8 +65,8 @@ stdenv.mkDerivation (finalAttrs: {
 
   meta = {
     description = "Custom Zitadel login UI with Yubico OTP";
-    homepage = "https://github.com/TODO/TODO";
-    # license = TODO; (lib.licenses.unfree would need allowUnfree to build)
+    homepage = "https://github.com/Lama3L9R/ai-slop-lamacloud-auth-addon";
+    license = "Anti-996";
     mainProgram = finalAttrs.pname;
     platforms = lib.platforms.linux;
   };
