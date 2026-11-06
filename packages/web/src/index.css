@@ -1,0 +1,241 @@
+/* IBM VGA 8x16, the Linux kernel's built-in console font.
+   From The Ultimate Oldschool PC Font Pack by VileR (CC BY-SA 4.0), see fonts/LICENSE-*.txt */
+@font-face {
+  font-family: 'VGA 8x16';
+  src: url('./fonts/WebPlus_IBM_VGA_8x16.woff') format('woff');
+  font-display: block;
+}
+
+:root {
+  --bg: #000;
+  --fg: #fff;
+  --dim: #888;
+  --label-width: 15ch;
+
+  font-family: 'VGA 8x16', monospace;
+  /* bitmap font: keep size a multiple of 16px so pixels stay sharp */
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: none;
+  font-smooth: never;
+  color: var(--fg);
+  background: var(--bg);
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+}
+
+::selection {
+  background: var(--fg);
+  color: var(--bg);
+}
+
+/* ---------- screen ---------- */
+
+.screen {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.terminal {
+  /* label column + room for a 44 char Yubico OTP */
+  width: calc(var(--label-width) + 44ch);
+  max-width: 100%;
+}
+
+.header {
+  margin-bottom: 2lh;
+}
+
+.title {
+  margin: 0;
+  font-size: inherit;
+}
+
+.service {
+  margin: 0;
+  color: var(--dim);
+}
+
+.service-name {
+  color: var(--fg);
+}
+
+/* ---------- fields ---------- */
+
+.field {
+  position: relative;
+  display: flex;
+  align-items: baseline;
+}
+
+/* prompt marker in the left gutter of the focused row */
+.field::before {
+  content: '>';
+  position: absolute;
+  left: -2ch;
+  visibility: hidden;
+}
+
+.field:focus-within::before {
+  visibility: visible;
+}
+
+.field label {
+  flex: 0 0 var(--label-width);
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+.field:focus-within label {
+  color: var(--fg);
+}
+
+.field input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  caret-color: var(--fg);
+  caret-shape: block;
+}
+
+.field input::placeholder {
+  color: var(--dim);
+  opacity: 0.6;
+}
+
+/* kill browser autofill colors */
+.field input:-webkit-autofill,
+.field input:-webkit-autofill:hover,
+.field input:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--fg);
+  -webkit-box-shadow: 0 0 0 1000px var(--bg) inset;
+  transition: background-color 9999s;
+}
+
+/* ---------- hint line ---------- */
+
+.hint {
+  margin: 2lh 0 0;
+  color: var(--dim);
+}
+
+.link {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.link:hover,
+.link:focus-visible {
+  outline: none;
+  background: var(--fg);
+  color: var(--bg);
+  text-decoration: none;
+}
+
+/* ---------- submit button ----------
+   Keyboard devices submit with Enter, so the button is only visible on touch screens
+   (no hover + coarse pointer). It stays in the DOM everywhere so Enter can submit a
+   multi-field form and screen readers can reach it. */
+
+.submit {
+  display: block;
+  margin-top: 2lh;
+  padding: 0.5lh 1ch;
+  border: none;
+  background: var(--fg);
+  color: var(--bg);
+  font: inherit;
+  cursor: pointer;
+}
+
+.submit::before {
+  content: '<';
+}
+
+.submit::after {
+  content: '>';
+}
+
+.submit:disabled {
+  background: var(--dim);
+}
+
+@media not all and (hover: none) and (pointer: coarse) {
+  .submit {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .only-touch {
+    display: none;
+  }
+}
+
+@media (hover: none) and (pointer: coarse) {
+  .only-keyboard {
+    display: none;
+  }
+}
+
+/* ---------- status line ---------- */
+
+.status {
+  margin-top: 1lh;
+  min-height: 1lh;
+  color: var(--dim);
+  white-space: pre-wrap;
+}
+
+.status.error {
+  color: var(--fg);
+}
+
+.status.error::before {
+  content: 'error: ';
+}
+
+/* ---------- narrow screens: stack label above input ---------- */
+
+@media (max-width: 480px) {
+  .field {
+    flex-direction: column;
+    margin-bottom: 0.5lh;
+  }
+
+  .field label {
+    flex-basis: auto;
+  }
+
+  .field input {
+    width: 100%;
+  }
+}

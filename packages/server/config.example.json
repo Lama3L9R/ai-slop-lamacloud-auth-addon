@@ -1,0 +1,19 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 3000,
+    "logLevel": "info",
+    "trustProxy": false
+  },
+  "zitadel": {
+    "url": "https://auth.example.com",
+    "serviceToken": "<PAT of a service user with the IAM_LOGIN_CLIENT role>"
+  },
+  "yubico": {
+    "clientId": "<client id from https://upgrade.yubico.com/getapikey/>",
+    "secretKey": "<secret key from the same page>",
+    "metadataKey": "yubico_otp"
+  },
+  "defaultRedirectUrl": "https://auth.example.com/ui/console",
+  "appNames": {}
+}
