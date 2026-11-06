@@ -1,5 +1,11 @@
 import { randomBytes } from 'node:crypto';
 
+/** The app login this sign-in completes: an OIDC auth request or a SAML request. */
+export interface AppRequest {
+  kind: 'oidc' | 'saml';
+  id: string;
+}
+
 /**
  * A login in progress: the password was accepted, a second step is pending.
  * Kept in memory only; a restart simply makes users start over.
@@ -8,12 +14,10 @@ export interface Flow {
   id: string;
   /** login: pending Yubico OTP check; bind: authenticated, waiting for a new YubiKey */
   purpose: 'login' | 'bind';
-  authRequestId: string | undefined;
+  appRequest: AppRequest | undefined;
   sessionId: string;
   sessionToken: string;
   userId: string;
-  /** organization of the user, for the management API */
-  orgId: string;
   loginName: string;
   /** YubiKey public IDs allowed for this user */
   yubikeyIds: string[];

@@ -43,24 +43,24 @@ export const accountRoutes: FastifyPluginAsync<{ config: Config; zitadel: Zitade
   app.post('/password/reset', { config: rateLimit }, async (req, reply) => {
     const { username } = resetBody.parse(req.body);
 
-    const user = await zitadel.findUser(username);
+    const found = await zitadel.findUser(username);
     let userId: string | undefined;
-    if (!user) {
+    if (!found) {
       req.log.info({ username }, 'password reset for unknown user not sent');
-    } else if (await zitadel.getUserMetadata(user, config.yubico.lockdownKey)) {
+    } else if (await zitadel.getUserMetadata(found, config.yubico.lockdownKey)) {
       // locked accounts get no reset email; the answer stays the same
-      req.log.info({ userId: user.id }, 'password reset for locked account not sent');
+      req.log.info({ userId: found }, 'password reset for locked account not sent');
     } else {
       try {
         await zitadel.requestPasswordReset(
-          user.id,
+          found,
           `${uiUrl}/password/set?userId={{.UserID}}&code={{.Code}}`,
         );
-        userId = user.id;
+        userId = found;
         req.log.info({ userId }, 'password reset requested');
       } catch (err) {
         if (!isClientError(err) || err.status === 401 || err.status === 403) throw err;
-        req.log.info({ err, userId: user.id }, 'password reset not sent');
+        req.log.info({ err, userId: found }, 'password reset not sent');
       }
     }
 

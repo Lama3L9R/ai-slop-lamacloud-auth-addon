@@ -3,26 +3,48 @@ import { api } from './api.ts';
 
 const query = new URLSearchParams(location.search);
 
-/**
- * OIDC auth request ID; Zitadel redirects to /login?authRequest=V2_...
- * Module-level so it survives navigation between login steps.
- */
-export const [authRequestId] = createSignal(rememberAuthRequest(query.get('authRequest')));
+/** The app login being completed: Zitadel sends /login?authRequest=V2_... or ?samlRequest=V2_... */
+export type AppRequest = { kind: 'oidc'; id: string } | { kind: 'saml'; id: string };
+
+const PARAMS = { oidc: 'authRequest', saml: 'samlRequest' } as const;
+
+/** Module-level so it survives navigation between login steps. */
+export const [appRequest] = createSignal(rememberAppRequest());
 
 /**
- * Keeps the auth request ID in sessionStorage so reloading the OTP step doesn't lose it.
- * Only the OTP page restores it: anywhere else a stored ID would be stale.
+ * Keeps the request in sessionStorage so reloading the OTP step doesn't lose it.
+ * Only the OTP page restores it: anywhere else a stored request would be stale.
  */
-function rememberAuthRequest(fromQuery: string | null): string | undefined {
-  const KEY = 'authRequest';
+function rememberAppRequest(): AppRequest | undefined {
+  const KEY = 'appRequest';
+  const oidc = query.get(PARAMS.oidc);
+  const saml = query.get(PARAMS.saml);
+  const fromQuery: AppRequest | undefined = oidc
+    ? { kind: 'oidc', id: oidc }
+    : saml
+      ? { kind: 'saml', id: saml }
+      : undefined;
   try {
-    if (fromQuery) sessionStorage.setItem(KEY, fromQuery);
-    if (fromQuery || !location.pathname.endsWith('/otp')) return fromQuery ?? undefined;
-    return sessionStorage.getItem(KEY) ?? undefined;
+    if (fromQuery) sessionStorage.setItem(KEY, JSON.stringify(fromQuery));
+    if (fromQuery || !location.pathname.endsWith('/otp')) return fromQuery;
+    const stored = sessionStorage.getItem(KEY);
+    return stored ? (JSON.parse(stored) as AppRequest) : undefined;
   } catch {
-    return fromQuery ?? undefined; // storage blocked
+    return fromQuery; // storage blocked
   }
 }
+
+/** Request fields for API bodies: { authRequest } or { samlRequest }. */
+export const appRequestFields = () => {
+  const request = appRequest();
+  return request ? { [PARAMS[request.kind]]: request.id } : {};
+};
+
+/** `path` with the app request kept in the query, e.g. /login?samlRequest=V2_... */
+export const withAppRequest = (path: string) => {
+  const request = appRequest();
+  return request ? `${path}?${PARAMS[request.kind]}=${encodeURIComponent(request.id)}` : path;
+};
 
 /** Name of the application the user is signing in to. */
 export const [serviceName, setServiceName] = createSignal<string>();
@@ -30,9 +52,10 @@ export const [serviceName, setServiceName] = createSignal<string>();
 /** Username suggested by the app (OIDC login_hint). */
 export const [loginHint, setLoginHint] = createSignal<string>();
 
-const id = authRequestId();
-if (id) {
-  api<{ appName?: string; loginHint?: string }>(`/auth-requests/${encodeURIComponent(id)}`)
+const request = appRequest();
+if (request) {
+  const path = request.kind === 'oidc' ? '/auth-requests/' : '/saml-requests/';
+  api<{ appName?: string; loginHint?: string }>(path + encodeURIComponent(request.id))
     .then((info) => {
       if (info.appName) setServiceName(info.appName);
       if (info.loginHint) setLoginHint(info.loginHint);

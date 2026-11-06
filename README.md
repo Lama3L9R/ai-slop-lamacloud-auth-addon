@@ -55,9 +55,14 @@ Custom Zitadel login UI (Login V2 API) with optional Yubico OTP as second factor
 ## Zitadel setup
 
 1. Create a service user, give it the **IAM_LOGIN_CLIENT** role (instance level), create a PAT.
-2. Enable Login V2 for the instance (or per app) and leave the base URI empty: Zitadel then uses
-   its default `/ui/v2/login` on its own domain, which is where this app lives
-   (login: `/ui/v2/login/login?authRequest=V2_...`, logout: `/ui/v2/login/logout?...`).
+2. Requires Zitadel v4. Turn on Login V2 for the whole instance (feature `loginV2.required`,
+   e.g. `PUT /v2/features/instance` with `{"loginV2": {"required": true}}`) or per app, and leave
+   the base URI empty: v4 then sends OIDC logins to `/ui/v2/login/login?authRequest=V2_...`, SAML
+   logins (redirect and POST binding) to `/ui/v2/login/login?samlRequest=V2_...` and logouts to
+   `/ui/v2/login/logout?...`, all on its own domain, which is where this app lives.
+   A link with `authRequestID=<number>` belongs to the old login (v1) and does not work here.
+   With the instance feature on, the console signs in here too; if this app breaks, a PAT can
+   still turn the feature off through the same API.
 3. YubiKeys are stored as user metadata `yubico_otp` (key configurable): the keys' public IDs, i.e.
    the first 12 characters of an OTP, comma or whitespace separated. Users bind keys themselves at
    `/ui/v2/login/yubikey` (first key: password; more keys: an OTP from an already bound key), where
@@ -78,8 +83,9 @@ Custom Zitadel login UI (Login V2 API) with optional Yubico OTP as second factor
 `packages/server/config.json` (see `config.example.json`; pass another path with `--config`).
 Yubico API credentials: https://upgrade.yubico.com/getapikey/
 
-Uses only APIs present in Zitadel 2.71 and newer. Before v4, Zitadel cannot look up an app's
-name for the "Signing in to <app>" line, so list them in `appNames` (`{ "<client id>": "Grafana" }`).
+The "Signing in to <app>" line shows the app's name from Zitadel (SAML apps are matched by the
+entity ID in their stored metadata). `appNames` overrides it, keyed by OIDC client ID or SAML
+entity ID: `{ "<client id>": "Grafana", "https://git.example/saml/metadata": "Git" }`.
 
 ## Reverse proxy
 
@@ -125,5 +131,7 @@ node packages/server/dist/index.js --config config.json   # set server.webRoot t
 
 ## Not implemented yet
 
-- SAML / device authorization requests, Zitadel-native MFA (TOTP, passkeys)
+- device authorization requests, Zitadel-native MFA (TOTP, passkeys)
+- SAML single logout: Zitadel answers it itself without involving the login UI (nothing to
+  terminate here anyway, see SSO below)
 - SSO across apps: no Zitadel session is kept in the browser, so every app login asks again

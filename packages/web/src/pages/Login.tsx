@@ -1,7 +1,7 @@
 import { createEffect, createSignal } from 'solid-js';
 import { useLocation, useNavigate } from '@solidjs/router';
-import { api, errorText, post, type StepResult } from '../api.ts';
-import { authRequestId, loginHint } from '../state.ts';
+import { api, errorText, leave, post, type StepResult } from '../api.ts';
+import { appRequestFields, loginHint, withAppRequest } from '../state.ts';
 import { Screen } from '../components/Screen.tsx';
 import { Field } from '../components/Field.tsx';
 import { Status, type StatusMessage } from '../components/Status.tsx';
@@ -39,12 +39,12 @@ export default function Login() {
     setStatus({ kind: 'info', text: 'authenticating...' });
     try {
       const res = await post<StepResult>('/login', {
-        authRequest: authRequestId(),
+        ...appRequestFields(),
         username: username(),
         password: password(),
       });
-      if ('redirect' in res) {
-        window.location.assign(res.redirect); // stay busy while the browser leaves
+      if (!('next' in res)) {
+        leave(res); // stay busy while the browser leaves
         return;
       }
       setStatus(null);
@@ -62,17 +62,12 @@ export default function Login() {
     (e.currentTarget.form?.elements.namedItem('password') as HTMLInputElement | null)?.focus();
   };
 
-  // keeps the auth request so a new account can sign in to the app right away
-  const withAuthRequest = (path: string) => {
-    const id = authRequestId();
-    return id ? `${path}?authRequest=${encodeURIComponent(id)}` : path;
-  };
-
   const onRegister = async () => {
     const { enabled } = await api<{ enabled: boolean }>('/registration').catch(() => ({
       enabled: false,
     }));
-    if (enabled) navigate(withAuthRequest('/register'));
+    if (enabled)
+      navigate(withAppRequest('/register')); // a new account signs in to the app right away;
     else setStatus({ kind: 'info', text: 'registration is not available yet' });
   };
 

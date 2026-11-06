@@ -1,6 +1,6 @@
 import { createSignal, Show } from 'solid-js';
-import { errorText, post } from '../api.ts';
-import { authRequestId, serviceName } from '../state.ts';
+import { errorText, leave, post, type Leave } from '../api.ts';
+import { appRequestFields, serviceName } from '../state.ts';
 import { Screen } from '../components/Screen.tsx';
 import { Field } from '../components/Field.tsx';
 import { Status, type StatusMessage } from '../components/Status.tsx';
@@ -37,15 +37,15 @@ export default function Register() {
     setBusy(true);
     setStatus({ kind: 'info', text: 'creating account...' });
     try {
-      const res = await post<{ redirect: string } | { registered: true }>('/register', {
-        authRequest: authRequestId(),
+      const res = await post<Leave | { registered: true }>('/register', {
+        ...appRequestFields(),
         username: username(),
         email: email(),
         password: password(),
         otp: key || undefined,
       });
-      if ('redirect' in res) {
-        window.location.assign(res.redirect); // stay busy while the browser leaves
+      if (!('registered' in res)) {
+        leave(res); // stay busy while the browser leaves
         return;
       }
       setStatus({

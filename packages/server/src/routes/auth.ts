@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Config } from '../config.ts';
-import { FLOW_TTL_MS, FlowStore, MAX_OTP_ATTEMPTS, type Flow } from '../flows.ts';
+import { FLOW_TTL_MS, FlowStore, MAX_OTP_ATTEMPTS, type AppRequest, type Flow } from '../flows.ts';
 import { HttpError, isClientError, passwordRulesError } from '../http.ts';
 import { API_PATH, BASE_PATH } from '../paths.ts';
 import { rememberSession } from '../sessions.ts';
@@ -10,14 +10,32 @@ import {
   ZitadelError,
   type CreatedSession,
   type SessionUser,
-  type UserRef,
   type ZitadelClient,
 } from '../zitadel.ts';
 
 const FLOW_COOKIE = 'lca_flow';
 
-const loginBody = z.object({
+/** The app login being completed: OIDC (?authRequest=) or SAML (?samlRequest=) */
+const appRequestFields = {
   authRequest: z.string().min(1).optional(),
+  samlRequest: z.string().min(1).optional(),
+};
+
+const toAppRequest = (body: {
+  authRequest?: string | undefined;
+  samlRequest?: string | undefined;
+}): AppRequest | undefined => {
+  if (body.authRequest && body.samlRequest) throw new HttpError(400, 'invalid request');
+  if (body.authRequest) return { kind: 'oidc', id: body.authRequest };
+  if (body.samlRequest) return { kind: 'saml', id: body.samlRequest };
+  return undefined;
+};
+
+/** Where the browser goes when the login is done. */
+type Leave = { redirect: string } | { post: { url: string; fields: Record<string, string> } };
+
+const loginBody = z.object({
+  ...appRequestFields,
   username: z.string().trim().min(1),
   password: z.string().min(1),
 });
@@ -38,7 +56,7 @@ const deactivateBody = z.object({
 });
 
 const registerBody = z.object({
-  authRequest: z.string().min(1).optional(),
+  ...appRequestFields,
   username: z.string().trim().min(1),
   email: z.string().trim().min(1),
   password: z.string().min(1),
@@ -57,7 +75,6 @@ export const authRoutes: FastifyPluginAsync<{ config: Config; zitadel: ZitadelCl
   /** public URL of the login UI, for links in Zitadel's emails (same domain as Zitadel) */
   const uiUrl = config.zitadel.url + BASE_PATH;
   const appNames = new Map(Object.entries(config.appNames));
-  let appLookup = true;
 
   const discardSession = (sessionId: string) =>
     zitadel.deleteSession(sessionId).catch((err) => {
@@ -81,37 +98,60 @@ export const authRoutes: FastifyPluginAsync<{ config: Config; zitadel: ZitadelCl
     reply.clearCookie(FLOW_COOKIE, { path: API_PATH });
   };
 
+  /** Hands the authenticated session to Zitadel for the app login. */
+  const completeAppRequest = async (
+    request: AppRequest,
+    session: CreatedSession,
+  ): Promise<Leave> => {
+    if (request.kind === 'oidc') {
+      return { redirect: await zitadel.createCallback(request.id, session) };
+    }
+    const res = await zitadel.createSamlResponse(request.id, session);
+    if (!res.post) return { redirect: res.url };
+    // POST binding: the browser has to submit the response to the SP's ACS
+    const fields: Record<string, string> = { SAMLResponse: res.post.samlResponse };
+    if (res.post.relayState) fields.RelayState = res.post.relayState;
+    return { post: { url: res.url, fields } };
+  };
+
   /**
-   * Hands the authenticated session to Zitadel and returns where the browser goes next.
+   * Finishes the login and returns where the browser goes next.
    * The session is remembered in this browser so /logout can terminate it.
    */
   const finish = async (
     req: FastifyRequest,
     reply: FastifyReply,
-    authRequestId: string | undefined,
+    request: AppRequest | undefined,
     session: CreatedSession,
     loginName: string,
-  ) => {
-    if (!authRequestId) {
+  ): Promise<Leave> => {
+    if (!request) {
       if (config.defaultRedirectUrl) {
         rememberSession(req, reply, { id: session.sessionId, loginName });
-        return config.defaultRedirectUrl;
+        return { redirect: config.defaultRedirectUrl };
       }
       void discardSession(session.sessionId);
       throw new HttpError(400, 'no login request, open this page from an app');
     }
     try {
-      const callbackUrl = await zitadel.createCallback(authRequestId, session);
+      const leave = await completeAppRequest(request, session);
       rememberSession(req, reply, { id: session.sessionId, loginName });
-      return callbackUrl;
+      return leave;
     } catch (err) {
       void discardSession(session.sessionId);
       if (err instanceof ZitadelError && err.status >= 400 && err.status < 500) {
-        app.log.info({ err, authRequestId }, 'auth request rejected');
+        app.log.info({ err, request }, 'app login request rejected');
         throw new HttpError(400, 'login request expired, go back to the app and try again');
       }
       throw err;
     }
+  };
+
+  const expired = (err: unknown) => {
+    if (err instanceof ZitadelError && err.status >= 400 && err.status < 500) {
+      return new HttpError(404, 'login request expired, go back to the app and try again');
+    }
+    return err;
   };
 
   // Info for the "Signing in to <app>" line and username prefill
@@ -120,22 +160,13 @@ export const authRoutes: FastifyPluginAsync<{ config: Config; zitadel: ZitadelCl
     try {
       authRequest = await zitadel.getAuthRequest(req.params.id);
     } catch (err) {
-      if (err instanceof ZitadelError && err.status >= 400 && err.status < 500) {
-        throw new HttpError(404, 'login request expired, go back to the app and try again');
-      }
-      throw err;
+      throw expired(err);
     }
 
     let appName = appNames.get(authRequest.clientId);
-    if (appName === undefined && appLookup) {
+    if (appName === undefined) {
       appName = await zitadel.getAppName(authRequest.clientId).catch((err) => {
-        if (err instanceof ZitadelError && err.status === 404) {
-          // the application service (v2) only exists since Zitadel v4
-          appLookup = false;
-          req.log.warn('app name lookup is not supported by this Zitadel, use config appNames');
-        } else {
-          req.log.warn({ err }, 'failed to look up app name');
-        }
+        req.log.warn({ err }, 'failed to look up app name');
         return undefined;
       });
       if (appName) appNames.set(authRequest.clientId, appName);
@@ -143,22 +174,45 @@ export const authRoutes: FastifyPluginAsync<{ config: Config; zitadel: ZitadelCl
     return { appName, loginHint: authRequest.loginHint };
   });
 
+  /** SAML app names by entity ID; reloaded (at most once a minute) when an issuer is unknown. */
+  let samlNames = new Map<string, string>();
+  let samlNamesLoaded = 0;
+  const samlAppName = async (issuer: string) => {
+    const name = appNames.get(issuer) ?? samlNames.get(issuer);
+    if (name !== undefined || Date.now() - samlNamesLoaded < 60_000) return name;
+    samlNamesLoaded = Date.now();
+    samlNames = await zitadel.getSamlAppNames();
+    return samlNames.get(issuer);
+  };
+
+  app.get<{ Params: { id: string } }>('/saml-requests/:id', async (req) => {
+    let samlRequest;
+    try {
+      samlRequest = await zitadel.getSamlRequest(req.params.id);
+    } catch (err) {
+      throw expired(err);
+    }
+    const appName = await samlAppName(samlRequest.issuer).catch((err) => {
+      req.log.warn({ err }, 'failed to look up SAML app names');
+      return undefined;
+    });
+    return { appName };
+  });
+
   const rateLimit = { rateLimit: { max: 20, timeWindow: '1 minute' } };
 
-  const readKeys = async (user: UserRef) => {
-    const metadata = await zitadel.getUserMetadata(user, config.yubico.metadataKey);
+  const readKeys = async (userId: string) => {
+    const metadata = await zitadel.getUserMetadata(userId, config.yubico.metadataKey);
     return metadata ? parsePublicIds(metadata) : [];
   };
 
-  const writeKeys = (user: UserRef, ids: string[]) =>
+  const writeKeys = (userId: string, ids: string[]) =>
     // an empty value deletes the metadata entry
-    zitadel.setUserMetadata(user, config.yubico.metadataKey, ids.join(', '));
+    zitadel.setUserMetadata(userId, config.yubico.metadataKey, ids.join(', '));
 
   /** Lost-key lockdown: set by the user, removed only by an admin. */
-  const isLocked = async (user: UserRef) =>
-    (await zitadel.getUserMetadata(user, config.yubico.lockdownKey)) !== undefined;
-
-  const flowUser = (flow: Flow): UserRef => ({ id: flow.userId, orgId: flow.orgId });
+  const isLocked = async (userId: string) =>
+    (await zitadel.getUserMetadata(userId, config.yubico.lockdownKey)) !== undefined;
 
   interface Authenticated {
     session: CreatedSession;
@@ -189,10 +243,7 @@ export const authRoutes: FastifyPluginAsync<{ config: Config; zitadel: ZitadelCl
       session = await zitadel.createSession(
         { loginName: username },
         method === 'otp' ? undefined : password,
-        {
-          ip: req.ip,
-          description: req.headers['user-agent'],
-        },
+        { ip: req.ip, description: req.headers['user-agent'] },
       );
     } catch (err) {
       // 4xx covers unknown user, wrong password, locked user, ...; don't tell them apart
@@ -209,8 +260,7 @@ export const authRoutes: FastifyPluginAsync<{ config: Config; zitadel: ZitadelCl
     let locked: boolean;
     try {
       user = await zitadel.getSessionUser(session.sessionId);
-      const ref = { id: user.id, orgId: user.organizationId };
-      [yubikeyIds, locked] = await Promise.all([readKeys(ref), isLocked(ref)]);
+      [yubikeyIds, locked] = await Promise.all([readKeys(user.id), isLocked(user.id)]);
     } catch (err) {
       void discardSession(session.sessionId);
       throw err;
@@ -252,15 +302,14 @@ export const authRoutes: FastifyPluginAsync<{ config: Config; zitadel: ZitadelCl
     reply: FastifyReply,
     purpose: Flow['purpose'],
     auth: Authenticated,
-    authRequestId?: string,
+    appRequest?: AppRequest,
   ) => {
     const flow = flows.create({
       purpose,
-      authRequestId,
+      appRequest,
       sessionId: auth.session.sessionId,
       sessionToken: auth.session.sessionToken,
       userId: auth.user.id,
-      orgId: auth.user.organizationId,
       loginName: auth.user.loginName,
       yubikeyIds: auth.yubikeyIds,
     });
@@ -282,7 +331,7 @@ export const authRoutes: FastifyPluginAsync<{ config: Config; zitadel: ZitadelCl
    */
   const activeFlow = async (req: FastifyRequest, reply: FastifyReply, purpose: Flow['purpose']) => {
     const flow = currentFlow(req, purpose);
-    if (await isLocked(flowUser(flow))) {
+    if (await isLocked(flow.userId)) {
       req.log.info({ userId: flow.userId, purpose }, 'flow of locked account ended');
       clearFlow(reply, flow);
       void discardSession(flow.sessionId);
@@ -323,19 +372,13 @@ export const authRoutes: FastifyPluginAsync<{ config: Config; zitadel: ZitadelCl
    */
   app.post('/login', { config: rateLimit }, async (req, reply) => {
     const body = loginBody.parse(req.body);
+    const request = toAppRequest(body);
     const auth = await authenticate(req, body.username, body.password);
 
     if (auth.method === 'otp' || auth.yubikeyIds.length === 0) {
-      const redirect = await finish(
-        req,
-        reply,
-        body.authRequest,
-        auth.session,
-        auth.user.loginName,
-      );
-      return { redirect };
+      return finish(req, reply, request, auth.session, auth.user.loginName);
     }
-    startFlow(req, reply, 'login', auth, body.authRequest);
+    startFlow(req, reply, 'login', auth, request);
     return { next: 'otp' };
   });
 
@@ -348,7 +391,7 @@ export const authRoutes: FastifyPluginAsync<{ config: Config; zitadel: ZitadelCl
     await verifyOtp(req, reply, flow, otp);
 
     clearFlow(reply, flow);
-    return { redirect: await finish(req, reply, flow.authRequestId, flow, flow.loginName) };
+    return finish(req, reply, flow.appRequest, flow, flow.loginName);
   });
 
   // ---------- YubiKey binding ----------
@@ -376,7 +419,7 @@ export const authRoutes: FastifyPluginAsync<{ config: Config; zitadel: ZitadelCl
   /** Step 2 page: the keys bound right now. The flow stays open while the user manages keys. */
   app.get('/yubikey/keys', async (req, reply) => {
     const flow = await activeFlow(req, reply, 'bind');
-    return { publicIds: await readKeys(flowUser(flow)) };
+    return { publicIds: await readKeys(flow.userId) };
   });
 
   /** An OTP from the new key proves possession; its public ID is added to the metadata. */
@@ -386,12 +429,12 @@ export const authRoutes: FastifyPluginAsync<{ config: Config; zitadel: ZitadelCl
     if (!isYubicoOtp(otp)) throw new HttpError(400, 'not a valid Yubico OTP');
 
     const publicId = otpPublicId(otp);
-    const ids = await readKeys(flowUser(flow)); // fresh: may have changed since step 1
+    const ids = await readKeys(flow.userId); // fresh: may have changed since step 1
     if (ids.includes(publicId)) throw new HttpError(409, 'this YubiKey is already bound');
 
     await verifyOtp(req, reply, flow, otp);
     const publicIds = [...ids, publicId];
-    await writeKeys(flowUser(flow), publicIds);
+    await writeKeys(flow.userId, publicIds);
     req.log.info({ userId: flow.userId, publicId }, 'yubikey bound');
     return { publicId, publicIds };
   });
@@ -399,11 +442,11 @@ export const authRoutes: FastifyPluginAsync<{ config: Config; zitadel: ZitadelCl
   app.post('/yubikey/deactivate', { config: rateLimit }, async (req, reply) => {
     const { publicId } = deactivateBody.parse(req.body);
     const flow = await activeFlow(req, reply, 'bind');
-    const ids = await readKeys(flowUser(flow));
+    const ids = await readKeys(flow.userId);
     if (!ids.includes(publicId)) throw new HttpError(404, 'this YubiKey is not bound');
 
     const publicIds = ids.filter((id) => id !== publicId);
-    await writeKeys(flowUser(flow), publicIds);
+    await writeKeys(flow.userId, publicIds);
     req.log.info({ userId: flow.userId, publicId }, 'yubikey deactivated');
     return { publicIds };
   });
@@ -417,21 +460,21 @@ export const authRoutes: FastifyPluginAsync<{ config: Config; zitadel: ZitadelCl
     const body = lostBody.parse(req.body);
     const publicId = parsePublicIds(body.publicId)[0];
 
-    const user = await zitadel.findUser(body.username);
-    if (!user) {
+    const userId = await zitadel.findUser(body.username);
+    if (!userId) {
       req.log.info({ username: body.username }, 'lost yubikey report for unknown user');
       return { done: true };
     }
-    const [ids, locked] = await Promise.all([readKeys(user), isLocked(user)]);
+    const [ids, locked] = await Promise.all([readKeys(userId), isLocked(userId)]);
     if (publicId && ids.includes(publicId) && !locked) {
       await zitadel.setUserMetadata(
-        user,
+        userId,
         config.yubico.lockdownKey,
         `${publicId} reported lost at ${new Date().toISOString()}`,
       );
-      req.log.warn({ userId: user.id, publicId }, 'account locked: yubikey reported lost');
+      req.log.warn({ userId, publicId }, 'account locked: yubikey reported lost');
     } else {
-      req.log.info({ userId: user.id, publicId, locked }, 'lost yubikey report did not match');
+      req.log.info({ userId, publicId, locked }, 'lost yubikey report did not match');
     }
     return { done: true };
   });
@@ -449,6 +492,7 @@ export const authRoutes: FastifyPluginAsync<{ config: Config; zitadel: ZitadelCl
   app.post('/register', { config: rateLimit }, async (req, reply) => {
     if (!registrationOrg) throw new HttpError(403, 'registration is not available yet');
     const body = registerBody.parse(req.body);
+    const request = toAppRequest(body);
     const otp = body.otp?.trim().toLowerCase();
     if (!z.email().safeParse(body.email).success) {
       throw new HttpError(400, 'not a valid email address');
@@ -497,12 +541,12 @@ export const authRoutes: FastifyPluginAsync<{ config: Config; zitadel: ZitadelCl
     }
     req.log.info({ userId, yubikey: Boolean(publicId) }, 'user registered');
 
-    if (!body.authRequest) return { registered: true };
+    if (!request) return { registered: true };
     // password and (optional) key were both just checked: sign in without another step
     const session = await zitadel.createSession({ userId }, body.password, {
       ip: req.ip,
       description: req.headers['user-agent'],
     });
-    return { redirect: await finish(req, reply, body.authRequest, session, body.username) };
+    return finish(req, reply, request, session, body.username);
   });
 };

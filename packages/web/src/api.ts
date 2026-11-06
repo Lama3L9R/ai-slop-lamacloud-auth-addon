@@ -35,5 +35,29 @@ export const post = <T>(path: string, body: unknown) =>
 export const errorText = (err: unknown) =>
   err instanceof ApiError ? err.message : 'cannot reach the server';
 
+/** How the browser leaves for the app: a redirect, or a form POST (SAML POST binding). */
+export type Leave =
+  { redirect: string } | { post: { url: string; fields: Record<string, string> } };
+
 /** Result of a login step: either another step follows, or the browser leaves for the app. */
-export type StepResult = { next: 'otp' } | { redirect: string };
+export type StepResult = { next: 'otp' } | Leave;
+
+export function leave(result: Leave) {
+  if ('redirect' in result) {
+    window.location.assign(result.redirect);
+    return;
+  }
+  const form = document.createElement('form');
+  form.method = 'POST';
+  form.action = result.post.url;
+  form.hidden = true;
+  for (const [name, value] of Object.entries(result.post.fields)) {
+    const input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = name;
+    input.value = value;
+    form.append(input);
+  }
+  document.body.append(form);
+  form.submit();
+}

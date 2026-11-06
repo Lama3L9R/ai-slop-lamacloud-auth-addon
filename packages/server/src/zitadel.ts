@@ -27,6 +27,22 @@ export interface AuthRequest {
   hintUserId?: string;
 }
 
+export interface SamlRequest {
+  id: string;
+  /** entity ID of the service provider */
+  issuer: string;
+  assertionConsumerService: string;
+  relayState?: string;
+  binding?: string;
+}
+
+/** Where the browser goes after a SAML login: a plain redirect, or a form POST to `url`. */
+export interface SamlResponse {
+  url: string;
+  redirect?: Record<string, never>;
+  post?: { relayState?: string; samlResponse: string };
+}
+
 export interface SessionUser {
   id: string;
   loginName: string;
@@ -48,10 +64,9 @@ export interface PasswordComplexity {
   requiresSymbol?: boolean;
 }
 
-/** A user plus the organization it belongs to (the management API is organization scoped). */
-export interface UserRef {
-  id: string;
-  orgId: string;
+interface Application {
+  name?: string;
+  samlConfiguration?: { metadataXml?: string; metadataUrl?: string };
 }
 
 export interface UserAgent {
@@ -68,19 +83,13 @@ export class ZitadelClient {
     this.token = token;
   }
 
-  private async request<T>(
-    method: string,
-    path: string,
-    body?: unknown,
-    headers?: Record<string, string>,
-  ): Promise<T> {
+  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const res = await fetch(this.baseUrl + path, {
       method,
       headers: {
         authorization: `Bearer ${this.token}`,
         accept: 'application/json',
         ...(body !== undefined && { 'content-type': 'application/json' }),
-        ...headers,
       },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(10_000),
@@ -115,6 +124,25 @@ export class ZitadelClient {
       { session: { sessionId: session.sessionId, sessionToken: session.sessionToken } },
     );
     return res.callbackUrl;
+  }
+
+  // ---------- SAML ----------
+
+  async getSamlRequest(samlRequestId: string): Promise<SamlRequest> {
+    const res = await this.request<{ samlRequest: SamlRequest }>(
+      'GET',
+      `/v2/saml/saml_requests/${encodeURIComponent(samlRequestId)}`,
+    );
+    return res.samlRequest;
+  }
+
+  /** Links an authenticated session to the SAML request; returns the response for the SP. */
+  async createSamlResponse(samlRequestId: string, session: CreatedSession): Promise<SamlResponse> {
+    return this.request<SamlResponse>(
+      'POST',
+      `/v2/saml/saml_requests/${encodeURIComponent(samlRequestId)}`,
+      { session: { sessionId: session.sessionId, sessionToken: session.sessionToken } },
+    );
   }
 
   // ---------- sessions ----------
@@ -155,9 +183,10 @@ export class ZitadelClient {
 
   /**
    * Looks a user up by login name the way the login does (a session checked only for the
-   * user, deleted right away). Undefined if Zitadel rejects the name; other errors throw.
+   * user, deleted right away). Returns the user ID, undefined if Zitadel rejects the name;
+   * other errors throw.
    */
-  async findUser(loginName: string): Promise<UserRef | undefined> {
+  async findUser(loginName: string): Promise<string | undefined> {
     let session: CreatedSession;
     try {
       session = await this.createSession({ loginName }, undefined);
@@ -172,16 +201,15 @@ export class ZitadelClient {
       throw err;
     }
     try {
-      const user = await this.getSessionUser(session.sessionId);
-      return { id: user.id, orgId: user.organizationId };
+      return (await this.getSessionUser(session.sessionId)).id;
     } finally {
       void this.deleteSession(session.sessionId).catch(() => {});
     }
   }
 
   /**
-   * Creates a human user (AddHumanUser: available in every Zitadel version with the v2 API).
-   * Zitadel emails a verification link built from `emailUrlTemplate` ({{.UserID}}, {{.Code}}).
+   * Creates a human user. Zitadel emails a verification link built from `emailUrlTemplate`
+   * ({{.UserID}} and {{.Code}} are filled in).
    */
   async createHumanUser(user: {
     organizationId: string;
@@ -191,22 +219,23 @@ export class ZitadelClient {
     emailUrlTemplate: string;
     metadata?: Record<string, string>;
   }): Promise<{ id: string }> {
-    const res = await this.request<{ userId: string }>('POST', '/v2/users/human', {
-      organization: { orgId: user.organizationId },
+    return this.request<{ id: string }>('POST', '/v2/users/new', {
+      organizationId: user.organizationId,
       username: user.username,
-      profile: {
-        givenName: user.username,
-        familyName: user.username,
-        displayName: user.username,
+      human: {
+        profile: {
+          givenName: user.username,
+          familyName: user.username,
+          displayName: user.username,
+        },
+        email: { email: user.email, sendCode: { urlTemplate: user.emailUrlTemplate } },
+        password: { password: user.password, changeRequired: false },
+        metadata: Object.entries(user.metadata ?? {}).map(([key, value]) => ({
+          key,
+          value: Buffer.from(value, 'utf8').toString('base64'),
+        })),
       },
-      email: { email: user.email, sendCode: { urlTemplate: user.emailUrlTemplate } },
-      password: { password: user.password, changeRequired: false },
-      metadata: Object.entries(user.metadata ?? {}).map(([key, value]) => ({
-        key,
-        value: Buffer.from(value, 'utf8').toString('base64'),
-      })),
     });
-    return { id: res.userId };
   }
 
   async verifyEmail(userId: string, code: string): Promise<void> {
@@ -240,51 +269,65 @@ export class ZitadelClient {
   }
 
   // ---------- metadata ----------
-  // Through the management API (v1): the user service (v2) only has metadata endpoints in
-  // recent Zitadel versions. v1 acts within the organization named in x-zitadel-orgid.
-
-  private metadataPath(user: UserRef, key?: string) {
-    const base = `/management/v1/users/${encodeURIComponent(user.id)}/metadata`;
-    return key === undefined ? base : `${base}/${encodeURIComponent(key)}`;
-  }
 
   /**
    * Returns the decoded metadata value for `key`, or undefined if the user has none.
-   * A search, not a get: a missing entry is an empty result, so every error (an unknown
-   * endpoint included) is thrown rather than read as "no metadata".
+   * A search: a missing entry is an empty result, so errors are never read as "no metadata".
    */
-  async getUserMetadata(user: UserRef, key: string): Promise<string | undefined> {
-    const res = await this.request<{ result?: { key: string; value: string }[] }>(
+  async getUserMetadata(userId: string, key: string): Promise<string | undefined> {
+    const res = await this.request<{ metadata?: { key: string; value: string }[] }>(
       'POST',
-      `${this.metadataPath(user)}/_search`,
-      { queries: [{ keyQuery: { key, method: 'TEXT_QUERY_METHOD_EQUALS' } }] },
-      { 'x-zitadel-orgid': user.orgId },
+      `/v2/users/${encodeURIComponent(userId)}/metadata/search`,
+      { filters: [{ keyFilter: { key, method: 'TEXT_FILTER_METHOD_EQUALS' } }] },
     );
-    const entry = res.result?.find((m) => m.key === key);
+    const entry = res.metadata?.find((m) => m.key === key);
     // metadata values are bytes, base64 encoded in JSON
     return entry ? Buffer.from(entry.value, 'base64').toString('utf8') : undefined;
   }
 
-  /** Sets (overwrites) one metadata entry of a user; an empty value removes it. */
-  async setUserMetadata(user: UserRef, key: string, value: string): Promise<void> {
-    const headers = { 'x-zitadel-orgid': user.orgId };
+  /** Sets (overwrites) one metadata entry of a user; an empty value deletes it. */
+  async setUserMetadata(userId: string, key: string, value: string): Promise<void> {
+    const path = `/v2/users/${encodeURIComponent(userId)}/metadata`;
     if (value) {
       const encoded = Buffer.from(value, 'utf8').toString('base64');
-      await this.request('POST', this.metadataPath(user, key), { value: encoded }, headers);
+      await this.request('POST', path, { metadata: [{ key, value: encoded }] });
     } else {
-      await this.request('DELETE', this.metadataPath(user, key), undefined, headers);
+      await this.request('DELETE', `${path}?keys=${encodeURIComponent(key)}`);
     }
   }
 
   // ---------- applications ----------
+  // ListApplications is a connect endpoint without a REST mapping.
 
-  /** Display name of the OIDC application with this client ID (connect endpoint, no REST mapping). */
-  async getAppName(clientId: string): Promise<string | undefined> {
-    const res = await this.request<{ applications?: { name?: string }[] }>(
+  private listApplications(filters: unknown[]) {
+    return this.request<{ applications?: Application[] }>(
       'POST',
       '/zitadel.application.v2.ApplicationService/ListApplications',
-      { filters: [{ clientIdFilter: { clientId } }] },
+      { filters, pagination: { limit: 1000 } },
     );
+  }
+
+  /** Display name of the OIDC application with this client ID. */
+  async getAppName(clientId: string): Promise<string | undefined> {
+    const res = await this.listApplications([{ clientIdFilter: { clientId } }]);
     return res.applications?.[0]?.name || undefined;
+  }
+
+  /**
+   * Display names of all SAML applications by entity ID (the issuer of their SAML requests).
+   * The API has no entity ID filter, so the IDs come from the stored SP metadata.
+   */
+  async getSamlAppNames(): Promise<Map<string, string>> {
+    const res = await this.listApplications([{ typeFilter: 'APPLICATION_TYPE_SAML' }]);
+    const names = new Map<string, string>();
+    for (const app of res.applications ?? []) {
+      const xml = app.samlConfiguration?.metadataXml;
+      if (!xml || !app.name) continue;
+      const entityId = /entityID\s*=\s*"([^"]+)"/.exec(
+        Buffer.from(xml, 'base64').toString('utf8'),
+      )?.[1];
+      if (entityId) names.set(entityId, app.name);
+    }
+    return names;
   }
 }

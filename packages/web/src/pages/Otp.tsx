@@ -1,7 +1,7 @@
 import { createSignal } from 'solid-js';
 import { useNavigate } from '@solidjs/router';
-import { ApiError, errorText, post } from '../api.ts';
-import { authRequestId } from '../state.ts';
+import { ApiError, errorText, leave, post, type Leave } from '../api.ts';
+import { withAppRequest } from '../state.ts';
 import { Screen } from '../components/Screen.tsx';
 import { Field } from '../components/Field.tsx';
 import { Status, type StatusMessage } from '../components/Status.tsx';
@@ -31,13 +31,11 @@ export default function Otp() {
     setBusy(true);
     setStatus({ kind: 'info', text: 'verifying...' });
     try {
-      const res = await post<{ redirect: string }>('/otp', { otp: value });
-      window.location.assign(res.redirect); // stay busy while the browser leaves
+      leave(await post<Leave>('/otp', { otp: value })); // stay busy while the browser leaves
       return;
     } catch (err) {
       if (err instanceof ApiError && err.restart) {
-        const id = authRequestId();
-        navigate(id ? `/login?authRequest=${encodeURIComponent(id)}` : '/', {
+        navigate(withAppRequest('/login'), {
           state: { error: err.message },
         });
         return;
