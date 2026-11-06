@@ -10,6 +10,7 @@ import {
   ZitadelError,
   type CreatedSession,
   type SessionUser,
+  type UserRef,
   type ZitadelClient,
 } from '../zitadel.ts';
 
@@ -56,6 +57,7 @@ export const authRoutes: FastifyPluginAsync<{ config: Config; zitadel: ZitadelCl
   /** public URL of the login UI, for links in Zitadel's emails (same domain as Zitadel) */
   const uiUrl = config.zitadel.url + BASE_PATH;
   const appNames = new Map(Object.entries(config.appNames));
+  let appLookup = true;
 
   const discardSession = (sessionId: string) =>
     zitadel.deleteSession(sessionId).catch((err) => {
@@ -125,9 +127,15 @@ export const authRoutes: FastifyPluginAsync<{ config: Config; zitadel: ZitadelCl
     }
 
     let appName = appNames.get(authRequest.clientId);
-    if (appName === undefined) {
+    if (appName === undefined && appLookup) {
       appName = await zitadel.getAppName(authRequest.clientId).catch((err) => {
-        req.log.warn({ err }, 'failed to look up app name');
+        if (err instanceof ZitadelError && err.status === 404) {
+          // the application service (v2) only exists since Zitadel v4
+          appLookup = false;
+          req.log.warn('app name lookup is not supported by this Zitadel, use config appNames');
+        } else {
+          req.log.warn({ err }, 'failed to look up app name');
+        }
         return undefined;
       });
       if (appName) appNames.set(authRequest.clientId, appName);
@@ -137,18 +145,20 @@ export const authRoutes: FastifyPluginAsync<{ config: Config; zitadel: ZitadelCl
 
   const rateLimit = { rateLimit: { max: 20, timeWindow: '1 minute' } };
 
-  const readKeys = async (userId: string) => {
-    const metadata = await zitadel.getUserMetadata(userId, config.yubico.metadataKey);
+  const readKeys = async (user: UserRef) => {
+    const metadata = await zitadel.getUserMetadata(user, config.yubico.metadataKey);
     return metadata ? parsePublicIds(metadata) : [];
   };
 
-  const writeKeys = (userId: string, ids: string[]) =>
+  const writeKeys = (user: UserRef, ids: string[]) =>
     // an empty value deletes the metadata entry
-    zitadel.setUserMetadata(userId, config.yubico.metadataKey, ids.join(', '));
+    zitadel.setUserMetadata(user, config.yubico.metadataKey, ids.join(', '));
 
   /** Lost-key lockdown: set by the user, removed only by an admin. */
-  const isLocked = async (userId: string) =>
-    (await zitadel.getUserMetadata(userId, config.yubico.lockdownKey)) !== undefined;
+  const isLocked = async (user: UserRef) =>
+    (await zitadel.getUserMetadata(user, config.yubico.lockdownKey)) !== undefined;
+
+  const flowUser = (flow: Flow): UserRef => ({ id: flow.userId, orgId: flow.orgId });
 
   interface Authenticated {
     session: CreatedSession;
@@ -199,7 +209,8 @@ export const authRoutes: FastifyPluginAsync<{ config: Config; zitadel: ZitadelCl
     let locked: boolean;
     try {
       user = await zitadel.getSessionUser(session.sessionId);
-      [yubikeyIds, locked] = await Promise.all([readKeys(user.id), isLocked(user.id)]);
+      const ref = { id: user.id, orgId: user.organizationId };
+      [yubikeyIds, locked] = await Promise.all([readKeys(ref), isLocked(ref)]);
     } catch (err) {
       void discardSession(session.sessionId);
       throw err;
@@ -249,6 +260,7 @@ export const authRoutes: FastifyPluginAsync<{ config: Config; zitadel: ZitadelCl
       sessionId: auth.session.sessionId,
       sessionToken: auth.session.sessionToken,
       userId: auth.user.id,
+      orgId: auth.user.organizationId,
       loginName: auth.user.loginName,
       yubikeyIds: auth.yubikeyIds,
     });
@@ -270,7 +282,7 @@ export const authRoutes: FastifyPluginAsync<{ config: Config; zitadel: ZitadelCl
    */
   const activeFlow = async (req: FastifyRequest, reply: FastifyReply, purpose: Flow['purpose']) => {
     const flow = currentFlow(req, purpose);
-    if (await isLocked(flow.userId)) {
+    if (await isLocked(flowUser(flow))) {
       req.log.info({ userId: flow.userId, purpose }, 'flow of locked account ended');
       clearFlow(reply, flow);
       void discardSession(flow.sessionId);
@@ -364,7 +376,7 @@ export const authRoutes: FastifyPluginAsync<{ config: Config; zitadel: ZitadelCl
   /** Step 2 page: the keys bound right now. The flow stays open while the user manages keys. */
   app.get('/yubikey/keys', async (req, reply) => {
     const flow = await activeFlow(req, reply, 'bind');
-    return { publicIds: await readKeys(flow.userId) };
+    return { publicIds: await readKeys(flowUser(flow)) };
   });
 
   /** An OTP from the new key proves possession; its public ID is added to the metadata. */
@@ -374,12 +386,12 @@ export const authRoutes: FastifyPluginAsync<{ config: Config; zitadel: ZitadelCl
     if (!isYubicoOtp(otp)) throw new HttpError(400, 'not a valid Yubico OTP');
 
     const publicId = otpPublicId(otp);
-    const ids = await readKeys(flow.userId); // fresh: may have changed since step 1
+    const ids = await readKeys(flowUser(flow)); // fresh: may have changed since step 1
     if (ids.includes(publicId)) throw new HttpError(409, 'this YubiKey is already bound');
 
     await verifyOtp(req, reply, flow, otp);
     const publicIds = [...ids, publicId];
-    await writeKeys(flow.userId, publicIds);
+    await writeKeys(flowUser(flow), publicIds);
     req.log.info({ userId: flow.userId, publicId }, 'yubikey bound');
     return { publicId, publicIds };
   });
@@ -387,11 +399,11 @@ export const authRoutes: FastifyPluginAsync<{ config: Config; zitadel: ZitadelCl
   app.post('/yubikey/deactivate', { config: rateLimit }, async (req, reply) => {
     const { publicId } = deactivateBody.parse(req.body);
     const flow = await activeFlow(req, reply, 'bind');
-    const ids = await readKeys(flow.userId);
+    const ids = await readKeys(flowUser(flow));
     if (!ids.includes(publicId)) throw new HttpError(404, 'this YubiKey is not bound');
 
     const publicIds = ids.filter((id) => id !== publicId);
-    await writeKeys(flow.userId, publicIds);
+    await writeKeys(flowUser(flow), publicIds);
     req.log.info({ userId: flow.userId, publicId }, 'yubikey deactivated');
     return { publicIds };
   });
@@ -405,29 +417,21 @@ export const authRoutes: FastifyPluginAsync<{ config: Config; zitadel: ZitadelCl
     const body = lostBody.parse(req.body);
     const publicId = parsePublicIds(body.publicId)[0];
 
-    try {
-      // a session checked only for the user is the same lookup as the login uses
-      const session = await zitadel.createSession({ loginName: body.username }, undefined);
-      let userId: string;
-      try {
-        userId = (await zitadel.getSessionUser(session.sessionId)).id;
-      } finally {
-        void discardSession(session.sessionId);
-      }
-      const [ids, locked] = await Promise.all([readKeys(userId), isLocked(userId)]);
-      if (publicId && ids.includes(publicId) && !locked) {
-        await zitadel.setUserMetadata(
-          userId,
-          config.yubico.lockdownKey,
-          `${publicId} reported lost at ${new Date().toISOString()}`,
-        );
-        req.log.warn({ userId, publicId }, 'account locked: yubikey reported lost');
-      } else {
-        req.log.info({ userId, publicId, locked }, 'lost yubikey report did not match');
-      }
-    } catch (err) {
-      if (!isClientError(err) || err.status === 401 || err.status === 403) throw err;
-      req.log.info({ err, username: body.username }, 'lost yubikey report for unknown user');
+    const user = await zitadel.findUser(body.username);
+    if (!user) {
+      req.log.info({ username: body.username }, 'lost yubikey report for unknown user');
+      return { done: true };
+    }
+    const [ids, locked] = await Promise.all([readKeys(user), isLocked(user)]);
+    if (publicId && ids.includes(publicId) && !locked) {
+      await zitadel.setUserMetadata(
+        user,
+        config.yubico.lockdownKey,
+        `${publicId} reported lost at ${new Date().toISOString()}`,
+      );
+      req.log.warn({ userId: user.id, publicId }, 'account locked: yubikey reported lost');
+    } else {
+      req.log.info({ userId: user.id, publicId, locked }, 'lost yubikey report did not match');
     }
     return { done: true };
   });

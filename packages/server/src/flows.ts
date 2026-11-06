@@ -12,6 +12,8 @@ export interface Flow {
   sessionId: string;
   sessionToken: string;
   userId: string;
+  /** organization of the user, for the management API */
+  orgId: string;
   loginName: string;
   /** YubiKey public IDs allowed for this user */
   yubikeyIds: string[];

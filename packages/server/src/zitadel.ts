@@ -48,6 +48,12 @@ export interface PasswordComplexity {
   requiresSymbol?: boolean;
 }
 
+/** A user plus the organization it belongs to (the management API is organization scoped). */
+export interface UserRef {
+  id: string;
+  orgId: string;
+}
+
 export interface UserAgent {
   ip?: string;
   description?: string;
@@ -62,13 +68,19 @@ export class ZitadelClient {
     this.token = token;
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    headers?: Record<string, string>,
+  ): Promise<T> {
     const res = await fetch(this.baseUrl + path, {
       method,
       headers: {
         authorization: `Bearer ${this.token}`,
         accept: 'application/json',
         ...(body !== undefined && { 'content-type': 'application/json' }),
+        ...headers,
       },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(10_000),
@@ -141,21 +153,35 @@ export class ZitadelClient {
 
   // ---------- users ----------
 
-  /** Returns the decoded metadata value for `key`, or undefined if the user has none. */
-  async getUserMetadata(userId: string, key: string): Promise<string | undefined> {
-    const res = await this.request<{ metadata?: { key: string; value: string }[] }>(
-      'POST',
-      `/v2/users/${encodeURIComponent(userId)}/metadata/search`,
-      { filters: [{ keyFilter: { key, method: 'TEXT_FILTER_METHOD_EQUALS' } }] },
-    );
-    const entry = res.metadata?.find((m) => m.key === key);
-    // metadata values are bytes, base64 encoded in JSON
-    return entry ? Buffer.from(entry.value, 'base64').toString('utf8') : undefined;
+  /**
+   * Looks a user up by login name the way the login does (a session checked only for the
+   * user, deleted right away). Undefined if Zitadel rejects the name; other errors throw.
+   */
+  async findUser(loginName: string): Promise<UserRef | undefined> {
+    let session: CreatedSession;
+    try {
+      session = await this.createSession({ loginName }, undefined);
+    } catch (err) {
+      const rejected =
+        err instanceof ZitadelError &&
+        err.status >= 400 &&
+        err.status < 500 &&
+        err.status !== 401 &&
+        err.status !== 403;
+      if (rejected) return undefined;
+      throw err;
+    }
+    try {
+      const user = await this.getSessionUser(session.sessionId);
+      return { id: user.id, orgId: user.organizationId };
+    } finally {
+      void this.deleteSession(session.sessionId).catch(() => {});
+    }
   }
 
   /**
-   * Creates a human user. Zitadel emails a verification link built from `emailUrlTemplate`
-   * ({{.UserID}} and {{.Code}} are filled in).
+   * Creates a human user (AddHumanUser: available in every Zitadel version with the v2 API).
+   * Zitadel emails a verification link built from `emailUrlTemplate` ({{.UserID}}, {{.Code}}).
    */
   async createHumanUser(user: {
     organizationId: string;
@@ -165,23 +191,22 @@ export class ZitadelClient {
     emailUrlTemplate: string;
     metadata?: Record<string, string>;
   }): Promise<{ id: string }> {
-    return this.request<{ id: string }>('POST', '/v2/users/new', {
-      organizationId: user.organizationId,
+    const res = await this.request<{ userId: string }>('POST', '/v2/users/human', {
+      organization: { orgId: user.organizationId },
       username: user.username,
-      human: {
-        profile: {
-          givenName: user.username,
-          familyName: user.username,
-          displayName: user.username,
-        },
-        email: { email: user.email, sendCode: { urlTemplate: user.emailUrlTemplate } },
-        password: { password: user.password, changeRequired: false },
-        metadata: Object.entries(user.metadata ?? {}).map(([key, value]) => ({
-          key,
-          value: Buffer.from(value, 'utf8').toString('base64'),
-        })),
+      profile: {
+        givenName: user.username,
+        familyName: user.username,
+        displayName: user.username,
       },
+      email: { email: user.email, sendCode: { urlTemplate: user.emailUrlTemplate } },
+      password: { password: user.password, changeRequired: false },
+      metadata: Object.entries(user.metadata ?? {}).map(([key, value]) => ({
+        key,
+        value: Buffer.from(value, 'utf8').toString('base64'),
+      })),
     });
+    return { id: res.userId };
   }
 
   async verifyEmail(userId: string, code: string): Promise<void> {
@@ -214,11 +239,41 @@ export class ZitadelClient {
     return res.settings;
   }
 
-  /** Sets (overwrites) one metadata entry of a user; an empty value deletes it. */
-  async setUserMetadata(userId: string, key: string, value: string): Promise<void> {
-    await this.request('POST', `/v2/users/${encodeURIComponent(userId)}/metadata`, {
-      metadata: [{ key, value: Buffer.from(value, 'utf8').toString('base64') }],
-    });
+  // ---------- metadata ----------
+  // Through the management API (v1): the user service (v2) only has metadata endpoints in
+  // recent Zitadel versions. v1 acts within the organization named in x-zitadel-orgid.
+
+  private metadataPath(user: UserRef, key?: string) {
+    const base = `/management/v1/users/${encodeURIComponent(user.id)}/metadata`;
+    return key === undefined ? base : `${base}/${encodeURIComponent(key)}`;
+  }
+
+  /**
+   * Returns the decoded metadata value for `key`, or undefined if the user has none.
+   * A search, not a get: a missing entry is an empty result, so every error (an unknown
+   * endpoint included) is thrown rather than read as "no metadata".
+   */
+  async getUserMetadata(user: UserRef, key: string): Promise<string | undefined> {
+    const res = await this.request<{ result?: { key: string; value: string }[] }>(
+      'POST',
+      `${this.metadataPath(user)}/_search`,
+      { queries: [{ keyQuery: { key, method: 'TEXT_QUERY_METHOD_EQUALS' } }] },
+      { 'x-zitadel-orgid': user.orgId },
+    );
+    const entry = res.result?.find((m) => m.key === key);
+    // metadata values are bytes, base64 encoded in JSON
+    return entry ? Buffer.from(entry.value, 'base64').toString('utf8') : undefined;
+  }
+
+  /** Sets (overwrites) one metadata entry of a user; an empty value removes it. */
+  async setUserMetadata(user: UserRef, key: string, value: string): Promise<void> {
+    const headers = { 'x-zitadel-orgid': user.orgId };
+    if (value) {
+      const encoded = Buffer.from(value, 'utf8').toString('base64');
+      await this.request('POST', this.metadataPath(user, key), { value: encoded }, headers);
+    } else {
+      await this.request('DELETE', this.metadataPath(user, key), undefined, headers);
+    }
   }
 
   // ---------- applications ----------

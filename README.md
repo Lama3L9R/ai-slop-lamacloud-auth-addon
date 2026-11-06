@@ -78,6 +78,9 @@ Custom Zitadel login UI (Login V2 API) with optional Yubico OTP as second factor
 `packages/server/config.json` (see `config.example.json`; pass another path with `--config`).
 Yubico API credentials: https://upgrade.yubico.com/getapikey/
 
+Uses only APIs present in Zitadel 2.71 and newer. Before v4, Zitadel cannot look up an app's
+name for the "Signing in to <app>" line, so list them in `appNames` (`{ "<client id>": "Grafana" }`).
+
 ## Reverse proxy
 
 Route `/ui/v2/login/` to this app and everything else to Zitadel, on the Zitadel domain
